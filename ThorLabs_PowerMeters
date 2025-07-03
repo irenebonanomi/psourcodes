@@ -1,0 +1,29 @@
+1. Run to check that PyVISA can read the instrument
+
+python - <<'PY'
+import pyvisa, platform
+rm = pyvisa.ResourceManager('@py')     # force the pure‑Python backend
+print("Backend:", rm.visalib)
+print("Resources I can see:", rm.list_resources())
+PY
+
+2. Switch to Windows OS
+Download the ThorLabs Software 
+Go to Help->Tools->Driver Switcher and switch the powermeter's driver to NI-VISA
+If the Driver is not installed, create NI account and download NI module
+
+3. Run
+
+sudo modprobe usbtmc          # loads the USB‑TMC kernel module
+sudo tee /etc/udev/rules.d/99-thorlabs-pm.rules <<'EOF'
+# Thorlabs power meters (vendor 0x1313)
+SUBSYSTEMS=="usb", ATTR{idVendor}=="1313", MODE="0666"
+KERNEL=="usbtmc*", MODE="0666"
+EOF
+sudo udevadm control --reload-rules && sudo udevadm trigger
+
+4. Run findPM.py 
+
+5. Update addresses
+
+6. Run your file 
