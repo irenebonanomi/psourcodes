@@ -1,3 +1,5 @@
+""" Jul 03 2025 """
+
 import pyvisa, textwrap
 rm = pyvisa.ResourceManager('@py')
 for addr in rm.list_resources():
