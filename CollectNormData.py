@@ -1,7 +1,6 @@
 """ Jul 01 2025 """
 
-"""
-Type of setup:
+"""s
 
 Light ---> Device Under Test ---> Detector 1
        |
@@ -10,8 +9,8 @@ Light ---> Device Under Test ---> Detector 1
        Detector 2
 """
 
-from bellMotors import APTMotor
-from bellMotors import RotationController
+#from bellMotors import APTMotor
+#from bellMotors import RotationController
 import pyvisa
 import pyvisa.errors
 import matplotlib.pyplot as plt
@@ -19,14 +18,14 @@ import numpy as np
 import time
 from scipy.optimize import curve_fit
 import sys
-from numba import jit, prange
 from multiprocessing import Pool, TimeoutError
 import usb
 from concurrent.futures import ThreadPoolExecutor
 import csv
 import glob
 import shutil
-
+import usb
+import os
 # Connect to powermeter 1 and 2
 
 # Start collecting data for a given time
@@ -39,104 +38,139 @@ import shutil
 
 # Plot power and normalized power
 
-# prints results
+# prints resultss
 
-def setup_powermeter(addr,countNum):
+def force_detach(addr):
+    # Extract the product ID from the VISA address (3rd field)
     try:
-        # Open the resource
-        pmeter = rm.open_resource(addr, open_timeout=1000)
-        
-        # Set the communication timeout, taking integration time into account
-        pmeter.timeout = 5000 + 0.5*countNum
-        
-        # Query and print the instrument's identification
-        print(pmeter.query("*IDN?"))
-        
-        # Configure the instrument settings
-        pmeter.write("SENS:CURR:RANGE:AUTO ON")  # Set the range to auto
-        pmeter.write("SENS:CORR:WAV 1550")  # Set the wavelength to 1550 nm
-        pmeter.write("SENS:POW:UNIT W")     # Set the power unit to watts
-        pmeter.write("sense:average:count "+str(int(countNum)))      # Set the averaging to 1000
-        
-        # Return the instrument object
-        print("Powermeter has been succesfully set up.")
-        return pmeter
+        pid = int(addr.split("::")[2], 16)
+    except Exception:
+        pid = 0x8078 if '8078' in addr else 0x8076
+    vid = 0x1313  # Thorlabs vendor ID
+    dev = usb.core.find(idVendor=vid, idProduct=pid)
+    if dev and dev.is_kernel_driver_active(0):
+        try:
+            dev.detach_kernel_driver(0)
+            print(f"Detached kernel driver from {hex(pid)}.")
+        except usb.core.USBError as e:
+            print("Detach failed:", e)
 
-    except pyvisa.errors.VisaIOError as e:
-        print(f"Error setting up instrument: {str(e)}")
-        return e
-    
-    except usb.core.USBTimeoutError as e:
-        print(f'usb error: {str(e)}')
-        return e
-    except:
-        print('unknown error on this pmeter:')
-        print(pmAddr)
-        return -1
+def setup_powermeter(addr, count_num):
+    force_detach(addr)
+    pm = rm.open_resource(addr, open_timeout=2000)
+    pm.timeout = 5000 + 500 * count_num
+    pm.write("*CLS")
+    pm.write("SENS:CORR:WAV 1550")
+    pm.write("SENS:POW:UNIT W")
+    pm.write(f"SENS:AVER:COUN {int(count_num)}")
+    print(pm.query("*IDN?").strip())
+    return pm
 
-def connectAndReadPower(addr,countNum):
-    times = [0,0,0]
-    times[0] = time.time()
-    success = False
-    try:
-        pm = setup_powermeter(addr,countNum)
-        if pm == -1:
-            success = False
-            return -1
-        else:
-            success = True 
-    except pyvisa.errors.VisaIOError as e:
-        print(f'error connecting to PM: {e}')
-        success = False
-        return e
-    if success is True:
-        times[1] = time.time()
-        pow = float(pm.query("meas:pow?"))
-        times[2] = time.time()
-        pm.close()
-        return pow, times
-
-def setCountTime(pms, countNum):
+def set_count_time(pms, count_num):
     for pm in pms:
-        pm.write("sense:average:count "+str(int(countNum)))
-        pm.timeout = 5000 + 0.5*countNum
+        pm.write(f"SENS:AVER:COUN {int(count_num)}")
+        pm.timeout = 5000 + 500 * count_num
 
-def getTwoPowers(pms):
-    ps = np.zeros((2,3))
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = executor.map(getPower, pms)
-        row = 0
-        for future in futures:
-            ps[row] = future
-            row += 1
-    return ps    
+def get_power(pm):
+    t0 = time.time()
+    p = float(pm.query("MEAS:POW?"))
+    t1 = time.time()
+    return p, t0, t1
 
-def TakeData(path,pm, pmNorm, countNum, nLoops):
+def get_two_powers(pms):
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        return list(pool.map(get_power, pms))
 
-    fname = path + f'test'.txt'
+def take_data(filepath, pm1, pm2, count_num=1, n_loops=200, pause=0.5):
+    set_count_time([pm1, pm2], count_num)
+    header = ['P1 [W]', 't0_1', 't1_1', 'P2 [W]', 't0_2', 't1_2']
 
-    setCountTime([pm,pmNorm], countNum)
+    with open(filepath, 'w', newline='') as f:
+        w = csv.writer(f)
+        w.writerow(header)
+
+        for i in range(n_loops):
+            print(f'[{i+1:04}/{n_loops}] reading power …')
+            (p1, t0_1, t1_1), (p2, t0_2, t1_2) = get_two_powers([pm1, pm2])
+            w.writerow([p1, t0_1, t1_1, p2, t0_2, t1_2])
+            time.sleep(pause)
+
+def plot_data(fn):
+    """
+    Plot power‑vs‑time traces stored by take_data().
     
-    for n in np.arange(nLoops):
+    Parameters
+    ----------
+    fn : str
+        Path to the CSV file written by take_data().
+    """
 
-        print('Reading power...')
+    cols = ['P1', 't0_1', 't1_1', 'P2', 't0_2', 't1_2']
+    data = {c: [] for c in cols}
 
-        powers = getTwoPowers([pm,pmNorm])
-        time.sleep(0.5)
+    with open(fn, newline='') as f:
+        rdr = csv.reader(f)
+        next(rdr)                    # skip header
+        for row in rdr:
+            for k, v in zip(cols, row):
+                data[k].append(float(v))
 
-        np.savetxt(fname,powers,delimiter=',')
+    P1 = 1e6 * np.asarray(data['P1'])        # W -> µW
+    P2 = 1e6 * np.asarray(data['P2'])        # W -> µW
+    t  = np.asarray(data['t0_1'])            # acquisition start times
+    Pnorm = P1 / P2                          # unitless
 
-pmAddr = 'USB0::4883::32885::P5002859::0::INSTR'
-pmNormAddr = 'USB0::4883::32886::M01112547::0::INSTR'
+    # Re‑zero time for prettier x‑axis
+    t -= t[0]
 
-countNum = 1
+    fig, ax1 = plt.subplots()
 
-connectAndReadPower(pmAddr, countNum)
-connectAndReadPower(pmNormAddr, countNum)
+    ax1.plot(t, P1, label='PM (µW)', linewidth=1.2)
+    ax1.plot(t, P2, label='PM Norm (µW)', linewidth=1.2, linestyle='--')
+    ax1.set_xlabel('Time [s]')
+    ax1.set_ylabel('Power [µW]')
+    ax1.grid(True, alpha=0.3)
 
-path = '/Users/inb4/Photon'
+    # Twin axis for the normalized power
+    ax2 = ax1.twinx()
+    ax2.plot(t, Pnorm, label='P_norm', color='tab:red', linewidth=1)
+    ax2.set_ylabel('Normalized Power (P₁/P₂) [unitless]', color='tab:red')
+    ax2.tick_params(axis='y', labelcolor='tab:red')
 
-TakeData(path,pm, pmNorm, countNum, 200)
+    # Collect legends from both y‑axes
+    lines = ax1.get_lines() + ax2.get_lines()
+    labels = [l.get_label() for l in lines]
+    ax1.legend(lines, labels, loc='upper right')
+
+    plt.title('Power traces and normalized power vs. time')
+    plt.tight_layout()
+
+    fig.savefig(fn.replace('.csv', '.png'), dpi=300, bbox_inches='tight')
+
+    plt.show()
+    
+rm = pyvisa.ResourceManager('@py')  # use pyvisa-py backend
+
+pm_addr = 'USB0::4883::32886::M01112547::0::INSTR'       # PM100D
+pm_norm_addr = 'USB0::4883::32888::P0040935::0::INSTR'   # PM101U
+save_path = '/home/qlab/OpticsCal'
+os.makedirs(save_path, exist_ok=True)
+
+pm1 = setup_powermeter(pm_addr, count_num=1)
+pm2 = setup_powermeter(pm_norm_addr, count_num=1)
+
+fn = 'pow_log_00.csv'
+
+try:
+    take_data(os.path.join(save_path, fn),
+              pm1, pm2, count_num=1, n_loops=10)
+    plot_data(f'/home/qlab/OpticsCal/{fn}')
+
+finally:
+    pm1.close()
+    pm2.close()
+
+
 
 
 
